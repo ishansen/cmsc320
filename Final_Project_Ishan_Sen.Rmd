@@ -1,0 +1,530 @@
+---
+title: "CMSC320 Final Project"
+output: html_document
+author: "Ishan Sen & Zachary Parikh"
+---
+
+
+##Introduction
+In this data science tutorial, we will be using an avocado prices dataset to model some of the things that you might want to do with some arbitrary data.  This data is important, because the cost of one popular produce item can be indicative of many things such as the cost of living in the area, and the relative health of the region's residents.  
+
+A person might want to analyze this data if they are an avocado fanatic, such as a millennial, and wants to know where they can get them for cheap, or perhaps if you are an avocado supplier and you want to see the regions where your strongest demand lies in order to improve your supply chain model.
+
+In combination with our avocados dataset we will also be analyzing a housing affordability table.  We will be joining our two datasets together to analyze which cities are best to buy homes in for avocado lovers.  Thus a lot of the data cleaning that we will be performing will be in preparation to join our two datasets together.  
+
+
+###Required Tools
+For this tutorial you will need to have R 3.5.0 or above. We use RStudio, but you can use any IDE you want.  
+
+
+###About Our Datasets:
+The avocado prices dataset details the cost of a single avocado from 2015 to present, across different American cities and regions.  It also details the total volume of avocados sold, the quantity they are sold in (small bags, large bags, or XL bags), and the type of avocado (3 different PLU varieties as well as organic or conventional).  You can find the dataset here https://www.kaggle.com/neuromusic/avocado-prices
+
+
+###List of Topics
+1. Exploratory Data Analysis (EDA)
+2. Machine Learning
+3. Analysis of Findings
+
+
+#Setup
+
+These are the packages that we will be using.
+```{r setup, warning = FALSE, message = FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+library(tidyverse)
+library(lubridate)
+library(cluster)
+library(factoextra)
+
+```
+
+This is our avocado dataset mentioned earlier.
+```{r avocado, message = FALSE}
+avocado_file <- "avocado.csv"
+
+avocado <- read_csv(avocado_file) %>%
+  readr::type_convert(col_types=cols(Date=col_date(format="%Y-%m"))) %>% # converting date to POSIx
+  select(-`X1`)
+
+head(avocado)
+```
+
+##Cleaning our avocado dataset
+Here I change the column names so that they are more regular throughout our dataset and can be more easily read. Then we check all of our columns for missing values.  
+
+We also edit how time is represented in our dataset, segmenting our year into quarters rather than worrying about the exact date.  This is useful for two reasons.  One it makes sorting by time a bit easier because two entities with close times will be lumped into the same category rather than being disjointed.  The other reason that this is useful for us is that our affordability table uses the same method of segmenting their time, so it will help with joining the tables later on.  
+
+```{r avocado cleaning} 
+# Reading in the avocado data
+
+avocado_tab <- avocado %>%
+  rename("avg_price" = AveragePrice) %>%
+  rename("date"= Date) %>%
+  rename("total_volume" = `Total Volume`) %>%
+  rename("total_bags" = `Total Bags`) %>%
+  rename("small_bags" = `Small Bags`) %>%
+  rename("large_bags" = `Large Bags`) %>%
+  rename("xl_bags" = `XLarge Bags`) %>%
+  mutate(month = month(date)) %>%
+  # Creating a quarter factor that is represented by the beginning month of the quarter. 
+  # This is to allow us to join on the affordability dataframe more easily
+  mutate(quarter = ifelse(month < 3, 12, ifelse(month < 6, 3, ifelse(month < 9, 6, ifelse(month < 12, 9, 12))))) %>% 
+  # Creating the same time variable as is in the affordability dataframe using the year 
+  # and quarter month to make joining easy
+  unite("time", c("year", "quarter"), sep="-", remove = FALSE) %>%
+  select(-quarter) %>%
+  type_convert(col_types=cols(time=col_date(format="%Y-%m"))) %>%
+  # Calculating the mean price of each quarter for each region 
+  group_by(time, region) %>%
+  mutate(quarter_mean_price = mean(avg_price)) %>%
+  ungroup() %>%
+  # Standardizing the average price of an avocado by region
+  group_by(region) %>%
+  mutate(mean_price = mean(quarter_mean_price)) %>%
+  mutate(sd_price = sd(avg_price)) %>%
+  mutate(norm_price = (quarter_mean_price - mean_price) / sd_price) %>%
+  ungroup() %>%
+  mutate(capital_count = stringi::stri_count_regex(region, "[[:upper:]]")) # number of capital letters
+
+missing_values <- avocado %>% summarise_all(funs(sum(is.na(.)) / n()))
+missing_values
+
+```
+
+We have found that our data does not contain any missing values.  We are kind of lucky in this regard, as a lot of the time when doing data analysis you will end up using data that is not as pristine as this dataset and might have many missing values.  If you do find missing values in your dataset you have a few remedies to make your data tidier.
+
+##What to do about Missing Values (if you have them)
+<b>Method 1. <u>Leave as missing:</u></b>.  This is easiest method, but not always the right option.  You would mostly use this when dealing with missing categorical or text based data.  
+
+<b>Method 2. <u>Data Manipulation:</u></b> Imagine if some of our missing values were in a <i>numerical attribute</i>.  We could then replace the missing value with the average of the rest of our data in that specific attribute.  This is also called <b>Imputation</b>. It is easy to do, and if you do it well, it shouldn't lead to much bias in your data.
+
+<b>Method 3. <u>Removal</u></b>  A lot of the time when working with data you will end up with data that is better to remove than to work with.  You will see this later with our example when we join our two datasets together and it creates entities that are now obsolete in our joined dataframe. 
+
+
+# Part 1. EDA
+
+Lets start off with somethings simple.  Suppose we just want to see which cities have the highest and lowest prices for avocados last year.
+
+```{r prices}
+city_prices <- avocado_tab %>%
+  select(region, year, avg_price) %>%
+  group_by(region, year) %>%
+  summarise(avg_price = mean(avg_price)) %>%
+  as_tibble()
+
+most_expensive <- city_prices %>%
+  filter(year == 2018) %>%
+  arrange(desc(avg_price))
+
+least_expensive <- city_prices %>%
+  filter(year == 2018) %>%
+  arrange(avg_price)
+
+most_expensive
+least_expensive
+
+```
+
+From this we can see that the most expensive region is the Hartford & Springfield areas, and the least expensive region is in Houston.
+
+
+### Average Prices Over Time
+Here I am plotting the overall average price of avocados over time.  Using this plot we can see how the prices have changed over time. 
+
+```{r avg prices plot}
+avocado_tab %>%
+  select(time, quarter_mean_price, region) %>%
+  group_by(time) %>%
+  summarise(avg_quarter_price = mean(quarter_mean_price)) %>%
+  ggplot(aes(y = avg_quarter_price, x = time)) +
+  geom_line()
+  
+```
+
+Analyzing the plot we can see that the price of avocados varies greatly from year to year. There are many reasons that these fluctuations could be occuring, but one could theorize that it could be because of different avocado crop yields for different times of year.  We should take note of these fluctuations, because they will be important for when we analyze how avocado prices and affordability are related.  
+
+
+### Purchase Volume by Month
+We saw in the previous plot that avocado prices are varying over the course of the year, so now another question that we might ask is, what month of the year are the most avocados being purchased and what are the average prices for each month?
+
+```{r month purchases}
+avocado_tab %>%
+  select(month, total_volume) %>%
+  group_by(month) %>%
+  summarise(avg_monthly_volume = mean(total_volume)) %>%
+  ggplot(aes(y = avg_monthly_volume, x = factor(month))) +
+  geom_bar(stat = "identity") + xlab("Month") + ylab("Average Volume")
+
+```
+
+Looking at the months all together, we can see that while they do not very that much, there are certain months where on average more avocados are purchased.  People seem to purchase more avocados in the months of February, May, and June. People are conversly buying less avocados in the later months of September through December. The highest volume of avocados is purchased in February. Since all of our data is collected from the United States, it could be that people are buying a lot of avocados to make guacomole for Super Bowl Sunday. 
+
+### Average Price by Month
+In what months do avocados cost the most? Analyzing this with out previous plot could help us draw some conclusions about why people buy more avocados in one month versus the other.  We would expect to see that months with lower average costs, would see higher average sales.
+
+```{r}
+avocado_tab %>%
+  select(month, avg_price) %>%
+  group_by(month) %>%
+  summarise(avg_monthly_price = mean(avg_price)) %>%
+  ggplot(aes(y = avg_monthly_price, x = factor(month))) +
+  geom_bar(stat = "identity")
+
+
+```
+
+We can see that our hypothesis was generally supported as the month with the highest sales (February), also had the lowest average price. 
+
+### Volume Sold at Different Price Ranges
+This plot could be useful to someone who is concerned with the amount of avocados that sell at different price points.  Say an avocado supplier wanted to know how much they should charge for their avocados. It would be very useful to the supplier if they were to know at what price points the retailer is able to best sell avocados.  The supplier would then be able to take this into account when analyzing their supply chain costs.  
+
+```{r amnt sold at diff prices}
+avocado_tab %>%
+  select(avg_price, total_volume) %>%
+  group_by(avg_price) %>%
+  summarise(avg_volume = mean(total_volume)) %>%
+  
+  ggplot(aes(y = avg_volume, x = cut(avg_price, breaks = 7))) +
+  geom_bar(stat = "identity") + xlab("Price ranges") + ylab("Average Volume")
+
+```
+
+Analyzing the graph we can see that the best price per avocado ranges from \$0.84 to \$1.24 and that if you charge any more than that, there is a steep drop off in the amount of avocados purchased.  Also, interestingly if you charge less than \$0.84 then the purchases also drops, one may theorize that there are simply less avocados that are sold at this price point, or perhaps only avocados that are poor in quality are sold at this price point in hope of minimizing losses on inventory.  
+
+
+## Affordability Dataset Setup
+
+### Relationship to mortgage affordability
+To see the affordability of mortgages within regions in the US, we will use Mortgage Affordability data from Zillow. The data was downloaded from Zillow Research page: https://www.zillow.com/research/data/. 
+
+First let's look at the raw data to understand what we are working with.
+
+```{r affordability, message = FALSE}
+csv_file <- "Affordability_Wide_2017Q4_Public.csv"
+afford_tab <- read_csv(csv_file)
+head(afford_tab)
+
+```
+
+As we can see, this is a relatively large dataframe with 1030 rows and 161 columns. 
+We are interested in the Mortgage Affordability, which is in the "Index" column. 
+We can see a summary of what else this column contains:
+
+```{r checking index}
+
+head(afford_tab %>%
+  group_by(Index) %>%
+  summarise())
+
+```
+
+We can also easily check for N/A values:
+
+```{r N/A check}
+
+head(apply(afford_tab, 2, function(x) any(is.na(x))), 10)
+
+```
+
+This indicates that there are some N/A values in certain columns. As such, when tidying the data we want to ensure that these are not accounted for. One thing to notice is that our Avocado dataset only contains values from the year 2015 upwards. As such, we want to filter our years to be greater than 2015. We also want to count how many capital letters exist in the region so that we can see how many words exist. To do this, we use the [stri_count_regex](https://www.rdrr.io/rforge/stringi/man/stri_count_regex.html) function from the stringi library. 
+
+```{r affordability tidy}
+
+afford_tab <- afford_tab %>%
+  filter(Index == "Mortgage Affordability") %>%
+  drop_na() %>%
+  filter(RegionID != 0, RegionName != "United States") %>%
+  select(RegionName, matches("^[1|2]")) %>%
+  gather(time, affordability, matches("^[1|2]")) %>%
+  type_convert(col_types=cols(time=col_date(format="%Y-%m"))) %>%
+  filter(year(time) >= 2015) %>%
+  separate(col = RegionName, into = c("region", "state"), sep = ",") %>%
+  mutate(capital_count = stringi::stri_count_regex(region, "[[:upper:]]")) 
+
+head(afford_tab)
+
+```
+
+We now have a tidy dataframe that has the affordability of each region for each quarter from 2015 onwards.
+
+Since we care about the price of avocados compared to the affordability of houses in specific regions within the US, we need to see if the regions of our two datasets match up. One way of identifying the common regions is by looking at the the regions of each dataset manually and checking how many match. What we decided to do was count the number of capital letters in each region and check the regions by matching capital letters. Since regions that only contain one capital letter will always be the same if they are the same region regardless, we do not need to focus on them too much for now. Instead, we will be looking at regions where there are more than one capital letter, indicating that it may be multiple regions that are joined. 
+
+```{r region checking}
+
+avocado_tab %>%
+  filter(year < 2018) %>%
+  group_by(region) %>%
+  filter(capital_count > 1) %>%
+  summarise()
+
+afford_tab %>%
+  group_by(region) %>%
+  filter(capital_count > 1) %>%
+  summarise()
+
+```
+
+What we notice here is that there are multiple occurances in the avocado tab where the region has two regions merged into one. There are a few instances where that is not the case, such as with "LasVegas" or "LosAngeles" but these are few. We also see that there are no spaces in the region for the avocado dataset but the regions in the affordability dataset do have spaces between any regions that have multiple words in them. There are also many instances where the regions are merged by a hyphen, such as with "Dallas-Fort Worth". As such, we need to tidy the data even further in order to easily merge our datasets.
+
+With our avocado dataset, we need to split the region entities that need to be split, i.e. turning "BaltimoreWashington" into "Baltimore" and "Washington" and making sure that we don't split regions such as "LasVegas". Since there are very few entities that need to potentially be split, we can create a whitelist of regions with multiple words in them that do not need to be split.
+
+Furthermore, in order to easily measure the average price of individual avocadoes we are stanardizing the average price by region. This will help us later down the line for analysis. 
+
+-----------------------------
+
+##Dataset tidying and joining
+
+```{r avocado region tidying}
+# Tidying the regions so that they match those of affordability
+
+# A character vector of names that have two capital letters but are meant to be together
+safe_two_caps <- c("LasVegas", "LosAngeles", "NewYork", "SanDiego", "SanFrancisco", "SouthCarolina", "Dallas-FortWorth", "Miami-FortLauderdale", "GreatLakes", "GrandRapids")
+
+split_word <- function(row) {
+  gsub("(.)([[:upper:]])", "\\1 \\2", row)
+}
+
+avocado_tab <- avocado_tab %>%
+  mutate(region = ifelse(region == "DallasFtWorth", "Dallas-FortWorth", region)) %>%
+  mutate(region = ifelse(region == "MiamiFtLauderdale", "Miami-FortLauderdale", region)) %>%
+  mutate(region = ifelse(region == "WestTexNewMexico", "Albuquerque", region)) %>%
+  rowwise() %>%
+  mutate(region = ifelse((capital_count == 2 && !(region %in% safe_two_caps)),
+                         split_word(region), region)) %>%
+  mutate(region = strsplit(as.character(region), " ")) %>%
+  unnest() %>%
+  filter(region != "")
+
+head(avocado_tab)
+
+```
+
+
+To further tidy the affordability table we need to merge the regions that have multiple words separated by a space and split certain region names such as "Los Angeles-Long Beach-Anaheim" to just "LosAngeles" as that is what it most closely corresponds to in the avocado dataset. 
+
+We will also be [standardizing](http://www.dataminingblog.com/standardization-vs-normalization/) the affordability by region in order to make analysis easier later on. 
+
+```{r affordability tidying}
+
+afford_tab <- afford_tab %>%
+  mutate(region = gsub(" ", "", region)) %>%
+  mutate(region = ifelse(region == "LosAngeles-LongBeach-Anaheim", "LosAngeles", region)) %>%
+  mutate(region = ifelse(region == "Louisville-JeffersonCounty", "Louisville", region)) %>%
+  group_by(region) %>%
+  mutate(mean_aff = mean(affordability)) %>%
+  mutate(sd_aff = sd(affordability)) %>%
+  mutate(norm_aff = (affordability - mean_aff) / sd_aff) %>%
+  ungroup()
+
+```
+
+Now that we have tidy datasets with the standardized mean price of avocados and the affordability of mortgages for each region by yearly quarter, we can do an [inner join](https://www.rdocumentation.org/packages/base/versions/3.6.0/topics/merge) of affordability on avocados. Since we are only interested about the affordability of mortgages and price of avocados, we will only select those attributes from the respective datasets with the region and year quarter.
+
+
+```{r merging}
+avocado_to_join <- avocado_tab %>%
+  select(region, time, norm_price)
+
+# removing duplicate rows 
+avocado_to_join <- avocado_to_join[!duplicated(avocado_to_join), ]
+
+afford_to_join <- afford_tab %>%
+  select(region, time, norm_aff)
+
+# removing duplicate rows
+afford_to_join <- afford_to_join[!duplicated(afford_to_join), ]
+
+# inner join with avocados and affordability
+merged_df <- merge(x = avocado_to_join, y = afford_to_join, by = c("region", "time")) 
+
+head(merged_df)
+
+```
+
+Here we can see that we have our data represent the normalized price and normalized affordability for each region for the respective quarter. To more easily view this, we can plot the affordability and price of avocados over time for each region. The price of avocados is the green and the affordability of mortgages is purple. 
+
+```{r plotting}
+merged_df %>%
+  ggplot() +
+  geom_line(aes(x=time,y=norm_price, group = region), color="GREEN", alpha=3/4, size=1/2) +
+  geom_line(aes(x=time,y=norm_aff, group=factor(region)), color="PURPLE", alpha=3/4, size=1/2) + 
+  labs(title="Standardized Average Avocado Price and Mortgage Affordability over Time",
+          x="date", y="Standardized Value")
+```
+
+Based on this, we can see that from 2016 onwards there is a strong indication that when avocado prices are high the affordability of mortgages is low, and vice versa. 
+
+We can create a score for how good a region is for millennials by looking at a new statistic (affordability - price). Since both data is in standard normal form, combining them creates a new statistic with variance = 2, so we divide this statistic by √2 to standardize it. 
+
+To more easily visualise this, we can plot this score by region across time and identify the regions as well.
+
+```{r plotting millennial score}
+merged_df <- merged_df %>%
+  mutate(year = year(time)) %>%
+  mutate(millennial_score = (norm_aff - norm_price)/sqrt(2))
+
+merged_df %>%
+  ggplot(aes(x = time, y = millennial_score, color = region)) + 
+  geom_point() + geom_line() + theme(legend.position = "none") + 
+  labs(title="Millennial Score by Region over Time",
+          x="Time", y="Millennial Score")
+
+```
+
+It seems that the millennial score fluctuates over time, but is generally the same trend from region to region. 
+
+To identify the best place to live for millennials we can arrange our dataset by the millennial score and then by year to see where the best places to live were in 2017. Likewise, we can look at the places that have the highest affordability and lowest prices. Of course, the prices and affordability are normalized so they do not equate to the actual price and affordability. 
+
+```{r finding max millennial score}
+
+merged_df %>%
+  arrange(desc(millennial_score)) %>%
+  arrange(desc(year)) %>%
+  head()
+
+merged_df %>%
+  arrange(desc(norm_aff)) %>%
+  arrange(desc(year)) %>%
+  head()
+
+merged_df %>%
+  arrange(norm_price) %>%
+  arrange(desc(year)) %>%
+  head()
+
+```
+
+Of course our millennial score is not a perfect measure of where to live. We want to see how the price and affordability relate to each other over the years. We can do this easily like so:
+
+```{r price x affordability all}
+merged_df %>%
+  filter(year == 2015) %>%
+  ggplot(aes(x = norm_aff, y = norm_price, color = region)) + geom_point() +
+  theme(legend.position = "none") + 
+  labs(title="Normalized Affordability by Normalized Price for 2015",
+          x="Normalized Affordability", y="Normalized Price")
+
+merged_df %>%
+  filter(year == 2016) %>%
+  ggplot(aes(x = norm_aff, y = norm_price, color = region)) + geom_point() +
+  theme(legend.position = "none") + 
+  labs(title="Normalized Affordability by Normalized Price for 2016",
+          x="Normalized Affordability", y="Normalized Price")
+
+merged_df %>%
+  filter(year == 2017) %>%
+  ggplot(aes(x = norm_aff, y = norm_price, color = region)) + geom_point() +
+  theme(legend.position = "none") + 
+  labs(title="Normalized Affordability by Normalized Price for 2017",
+          x="Normalized Affordability", y="Normalized Price")
+
+```
+
+Here it is, all visualised together:
+
+```{r total price x affordability}
+merged_df %>%
+  ggplot(aes(x = norm_aff, y = norm_price, color = region)) + geom_point() + 
+  theme(legend.position = "none") +
+  labs(title="Normalized Affordability by Normalized Price",
+          x="Normalized Affordability", y="Normalized Price")
+
+```
+
+## Machine learning
+
+We know that avocados don't actually affect mortgage affordability. Our millennial score is still a good measure of how good a region is for avocado lovers to live, so we will continue to use it as a measure of goodness. 
+
+We want to see if there is any relationship that can be formed between the affordability and average avocado price, and to categorize regions by how good they are for millennials. 
+
+To do this, we will use an unsupervised machine learning technique known as [K-Means clustering](https://en.wikipedia.org/wiki/K-means_clustering). The high-level goal of K-Mean cluster analysis is to organize our entities that are similar to each other into K clusters. These objects will usually be more similar to entities within its group than to those of other groups. In doing so, we will be able to find regions that are similar to each other with regard to the millennial score. We will be using the [kmeans](https://www.rdocumentation.org/packages/stats/versions/3.6.0/topics/kmeans) function found in the cluster package to do so. 
+
+Something to think about with K-Means clustering is the value of K. To do this, we will plot the total sum of squares by the number of clusters to identify a good number of clusters.
+
+
+```{r cluster number check}
+
+# selecting the attributes by which we will be clustering
+clustering_df <- merged_df %>%
+  select(norm_aff, norm_price)
+
+# generating total sum of squares
+wss <- (nrow(clustering_df)-1)*sum(apply(clustering_df,2,var))
+  for (i in 2:15) wss[i] <- sum(kmeans(clustering_df,
+                                       centers=i)$withinss)
+
+# plotting total sum of squares by 
+plot(1:15, wss, type="b", xlab="Number of Clusters",
+     ylab="Total Sum of Squares")
+
+```
+
+Based on this, we see that the total sum of squares begins to flatten out at K = 10. We can still safely use K = 9 as our number of clusters. We can plot the data points and visualise the clusters using the [fviz_cluster](https://www.rdocumentation.org/packages/factoextra/versions/1.0.5/topics/fviz_cluster) function from the factoextra package.
+
+```{r cluster}
+set.seed(7) # setting seed for consistency for explanation
+
+# clustering our data
+k <- kmeans(clustering_df, centers = 9, nstart = 25)
+
+merged_df$cluster = as.factor(k$cluster)
+
+# visualizing the clusters
+fviz_cluster(k, data = clustering_df, labelsize = 0, xlab = "Normalized Affordability", ylab = "Normalized Price")
+
+```
+
+Based on this, we can see that the lower right cluster has high affordability and low avocado prices. This would indicate that it has a high millennial score. We can visualise the millennial score of the clusters over time by computing the cluster millennial score for regions within the cluster over time and plot said values.
+
+```{r mini lines}
+
+merged_df %>%
+  group_by(time, cluster) %>%
+  mutate(cluster_mean = mean(millennial_score)) %>%
+  ungroup() %>%
+  ggplot(aes(x=time, y=millennial_score)) +
+    geom_line(aes(group=region), color="BLACK", alpha=1/2, size=1/2) +
+    facet_wrap(~cluster) + 
+  labs(title="Millennial Score over Time for Clusters",
+          x="Time", y="Millennial Score")
+
+```
+
+From this we can see that the places with the highest millennial score correspond with the cluster that has high affordability and low avocado prices. This cluster also has the majority of points be in 2017, which is ideal for us. 
+
+We can now identify which regions are in this good cluster, which are probably regions where we would want to live. 
+
+```{r identifying top cluster}
+
+best_cluster <- merged_df %>%
+  group_by(cluster) %>%
+  # computing mean score per cluster to identify best cluster
+  mutate(mean_score = mean(millennial_score)) %>%
+  ungroup() %>%
+  filter(mean_score == max(mean_score)) %>%
+  arrange(desc(millennial_score)) %>%
+  arrange(desc(year))
+
+head(best_cluster, 10)
+
+  
+```
+
+## Analysis of Findings
+
+Based on the table above we can see the top 10 regions to live in for a good millennial score in 2017, i.e. there is high affordability and low avocado prices. If we had data for avocados for more years we could perform a better time series analysis on it to predict good regions to live in for the future. 
+
+## Final Thoughts
+
+Throughout this tutorial, we have gone through the entire data science pipeline (data management, exploratory data analysis, machine learning, and analysis of findings) and managed to identify regions that are good for millennials to live in. 
+
+In an ideal world we would have much more data to work with in order to perform a time series analysis and predict future regions that would be good for millennials. While this was more of a fun project, we could use overall price of food and other attributes to determine which regions have a high cost of living. 
+
+We understand that we did not adjust to inflation, so prices and affordability may not be totally indicative of what it actually is for each region. 
+
+We hope that throughout this tutorial, you got an idea about how to use some of the different tools for data analysis, and how they can help you better analyze your data.  We also hope that you had some fun looking at avocado data!
+
+ 
+ 
+ 
